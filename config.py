@@ -68,10 +68,10 @@ class Config:
         self.COOKIES_URL: List[str] = self._parse_cookies()
 
         # Images
-        self.DEFAULT_THUMB: str = getenv("DEFAULT_THUMB", "https://files.catbox.moe/zlmv6v.png")
-        self.PING_IMG: str = getenv("PING_IMG", "https://files.catbox.moe/zlmv6v.png")
-        self.START_IMG: str = getenv("START_IMG", "https://files.catbox.moe/zlmv6v.png")
-        self.RADIO_IMG: str = getenv("RADIO_IMG", "https://files.catbox.moe/zlmv6v.png")
+        self.DEFAULT_THUMB: str = getenv("DEFAULT_THUMB", "https://files.catbox.moe/d9unds.png")
+        self.PING_IMG: str = getenv("PING_IMG", "https://files.catbox.moe/d9unds.png")
+        self.START_IMG: str = getenv("START_IMG", "https://files.catbox.moe/d9unds.png")
+        self.RADIO_IMG: str = getenv("RADIO_IMG", "https://files.catbox.moe/d9unds.png")
         
         # Sticker ID for welcome message
         self.STICKER_ID: str = getenv("STICKER_ID", "CAACAgUAAxkBAAERZd9qMHDSNUAH_8ZAnU4aT97Aw5THZwACdh8AApKxgFWOSimDJoOjCjwE")
