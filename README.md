@@ -2,11 +2,11 @@
 
 <img src="https://files.catbox.moe/zlmv6v.png" width="400">
 
-# 🎵 Elevenyts
+# 🎵 Juno X Music
 
 ### Advanced Telegram Voice Chat Music Bot
 
-[![Typing SVG](https://readme-typing-svg.herokuapp.com/?lines=WELCOME+TO+Elevenyts+REPOSITORY;ADVANCED+TELEGRAM+MUSIC+BOT;HIGH+QUALITY+VOICE+CHAT+STREAMING;MULTI+LANGUAGE+SUPPORT;POWERED+BY+ARTISTBOTS)](https://github.com)
+[![Typing SVG](https://readme-typing-svg.herokuapp.com/?lines=WELCOME+TO+JUNO+X+MUSIC;ADVANCED+TELEGRAM+MUSIC+BOT;HIGH+QUALITY+VOICE+CHAT+STREAMING;MULTI+LANGUAGE+SUPPORT;POWERED+BY+JUNO+X+MUSIC)](https://github.com)
 
 <br>
 
@@ -36,9 +36,9 @@
 
 ---
 
-# 🌟 About Elevenyts
+# 🌟 About Juno X Music
 
-Elevenyts is an advanced Telegram Voice Chat Music Bot built with **Pyrogram**, **PyTgCalls**, and **MongoDB**.
+Juno X Music is an advanced Telegram Voice Chat Music Bot built with **Pyrogram**, **PyTgCalls**, and **MongoDB**.
 
 It allows users to stream high-quality music directly inside Telegram Voice Chats with premium playback performance, playlist management, queue system, admin controls, broadcasting features, statistics tracking, and multi-language support.
 
