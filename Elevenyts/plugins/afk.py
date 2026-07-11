@@ -29,6 +29,94 @@ from Elevenyts import app, db
 logger = logging.getLogger(__name__)
 
 
+async def _set_afk(chat_id: int, user_id: int, reason: str = "",
+                   media_file_id: str | None = None, since: float | None = None):
+    if not hasattr(db, "cache"):
+        return None
+    payload = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "reason": reason or "No reason given",
+        "since": since or time.time(),
+    }
+    if media_file_id:
+        payload["media_file_id"] = media_file_id
+    await db.cache.update_one(
+        {"_id": f"afk_{chat_id}_{user_id}"},
+        {"$set": payload},
+        upsert=True,
+    )
+
+
+async def _get_afk(chat_id: int, user_id: int):
+    if not hasattr(db, "cache"):
+        return None
+    doc = await db.cache.find_one({"_id": f"afk_{chat_id}_{user_id}"})
+    return doc if doc else None
+
+
+async def _remove_afk(chat_id: int, user_id: int):
+    if not hasattr(db, "cache"):
+        return None
+    await db.cache.delete_one({"_id": f"afk_{chat_id}_{user_id}"})
+
+
+async def _get_all_afk(chat_id: int):
+    if not hasattr(db, "cache"):
+        return []
+    docs = []
+    async for doc in db.cache.find({"chat_id": chat_id, "_id": {"$regex": f"^afk_{chat_id}_"}}):
+        docs.append(doc)
+    return docs
+
+
+async def _set_gafk(user_id: int, reason: str = "",
+                    media_file_id: str | None = None, since: float | None = None):
+    if not hasattr(db, "cache"):
+        return None
+    payload = {
+        "user_id": user_id,
+        "reason": reason or "No reason given",
+        "since": since or time.time(),
+    }
+    if media_file_id:
+        payload["media_file_id"] = media_file_id
+    await db.cache.update_one(
+        {"_id": f"gafk_{user_id}"},
+        {"$set": payload},
+        upsert=True,
+    )
+
+
+async def _get_gafk(user_id: int):
+    if not hasattr(db, "cache"):
+        return None
+    doc = await db.cache.find_one({"_id": f"gafk_{user_id}"})
+    return doc if doc else None
+
+
+async def _remove_gafk(user_id: int):
+    if not hasattr(db, "cache"):
+        return None
+    await db.cache.delete_one({"_id": f"gafk_{user_id}"})
+
+
+if not hasattr(db, "set_afk"):
+    db.set_afk = _set_afk
+if not hasattr(db, "get_afk"):
+    db.get_afk = _get_afk
+if not hasattr(db, "remove_afk"):
+    db.remove_afk = _remove_afk
+if not hasattr(db, "get_all_afk"):
+    db.get_all_afk = _get_all_afk
+if not hasattr(db, "set_gafk"):
+    db.set_gafk = _set_gafk
+if not hasattr(db, "get_gafk"):
+    db.get_gafk = _get_gafk
+if not hasattr(db, "remove_gafk"):
+    db.remove_gafk = _remove_gafk
+
+
 # ──────────────────────────────────────────────
 #  Atomic notification claim (uses db.cache)
 # ──────────────────────────────────────────────
