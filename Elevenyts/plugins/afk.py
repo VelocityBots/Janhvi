@@ -106,12 +106,12 @@ def _get_trigger(message: Message) -> str:
     return first.lstrip("/").split("@", 1)[0].lower()
 
 
-async def _sticker_to_jpeg(client, sticker) -> Optional[str]:
+async def _sticker_to_jpeg(client, sticker_file_id: str) -> Optional[str]:
     src_path = os.path.join(TMP_DIR, f"stk_{uuid.uuid4().hex}")
     jpg_path = src_path + ".jpg"
     downloaded = None
     try:
-        downloaded = await client.download_media(sticker.file_id, file_name=src_path)
+        downloaded = await client.download_media(sticker_file_id, file_name=src_path)
         if not downloaded or not os.path.exists(downloaded):
             return None
 
@@ -317,7 +317,7 @@ async def _extract_media_data(message: Message) -> Dict[str, Any]:
     if message.voice:
         return {"media_type": "voice", "media_file_id": message.voice.file_id, "caption": message.caption or ""}
     if message.sticker:
-        converted = await _sticker_to_jpeg(app, message.sticker)
+        converted = await _sticker_to_jpeg(app, message.sticker.file_id)
         if converted:
             return {"media_type": "photo", "media_file_id": converted, "caption": message.caption or ""}
     if message.document and not getattr(message.document, "mime_type", "") == "image/webp":
