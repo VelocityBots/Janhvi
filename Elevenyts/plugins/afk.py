@@ -228,9 +228,28 @@ async def _claim_welcome_back(chat_id: int, user_id: int, ttl: int = 5) -> bool:
         return False
 
 
-def _afk_card(name_html: str, duration: str, since: str, reason: str, is_global: bool) -> str:
+def _format_media_caption(media_type: str, caption: str) -> str:
+    if not media_type or media_type == "text":
+        return ""
+
+    label_map = {
+        "photo": "photo",
+        "animation": "gif",
+        "video": "video",
+        "sticker": "sticker telegram",
+        "audio": "audio",
+        "voice": "voice",
+        "document": "document",
+    }
+    label = label_map.get(media_type, media_type)
+    safe_caption = (caption or "").strip() or "None"
+    return f"\n[{label}] caption: {safe_caption}\n"
+
+
+def _afk_card(name_html: str, duration: str, since: str, reason: str, is_global: bool, media_type: Optional[str] = None, media_caption: Optional[str] = None) -> str:
     label = " [ɢʟᴏʙᴀʟ]" if is_global else ""
     reason = reason.strip() or "None"
+    media_section = _format_media_caption(media_type or "", media_caption or "")
     return (
         f"{DIVIDER}\n"
         f"<b>💤 AFK MODE{label}</b>\n\n"
@@ -238,18 +257,21 @@ def _afk_card(name_html: str, duration: str, since: str, reason: str, is_global:
         f"<b>⏱ Away:</b>\n{duration}\n\n"
         f"<b>📅 Since:</b>\n{since}\n\n"
         f"<b>📝 Reason:</b>\n{reason}\n"
+        f"{media_section}"
         f"{DIVIDER}"
     )
 
 
-def _welcome_back_card(name_html: str, duration: str, reason: str) -> str:
+def _welcome_back_card(name_html: str, duration: str, reason: str, media_type: Optional[str] = None, media_caption: Optional[str] = None) -> str:
     reason = reason.strip() or "None"
+    media_section = _format_media_caption(media_type or "", media_caption or "")
     return (
         f"{DIVIDER}\n"
         f"<b>✨ Welcome Back</b>\n\n"
         f"<b>👤</b> {name_html}\n\n"
         f"<b>⏱ AFK Time</b>\n{duration}\n\n"
         f"<b>📝 Reason</b>\n{reason}\n"
+        f"{media_section}"
         f"{DIVIDER}"
     )
 
@@ -579,7 +601,15 @@ async def _handle_afk_notification(message: Message) -> None:
             since_label = _format_age(since_timestamp)
             user_name = message.reply_to_message.from_user.first_name if message.reply_to_message and message.reply_to_message.from_user else (message.from_user.first_name if message.from_user else "User")
             card_text = (
-                f"{_afk_card(user_name, since_label, _format_since_time(since_timestamp), reason, bool(afk_entry.get('is_global', False)))}\n"
+                f"{_afk_card(
+                    user_name,
+                    since_label,
+                    _format_since_time(since_timestamp),
+                    reason,
+                    bool(afk_entry.get('is_global', False)),
+                    media_payload.get('media_type', 'text'),
+                    media_payload.get('caption', ''),
+                )}\n"
                 f"<i>Triggered by:</i> {message.from_user.first_name}"
             )
             if media_payload.get("media_type", "text") == "text":
@@ -642,7 +672,13 @@ async def _run_welcome_back(client, message: Message, user, *, force_local=False
     if remove_global and global_entry:
         await _remove_afk_entry(user_id, chat_id, True)
 
-    text = _welcome_back_card(_mention(user), duration, reason)
+    text = _welcome_back_card(
+        _mention(user),
+        duration,
+        reason,
+        media_payload.get("media_type", "text"),
+        media_payload.get("caption", ""),
+    )
     await _send_welcome_back(chat_id=chat_id, reply_to=message.id, user=user, reason=reason, duration=duration)
     if media_payload.get("media_type", "text") != "text":
         await _send_afk_media(chat_id, message.id, media_payload, caption_override=text)
@@ -692,7 +728,15 @@ async def _handle_afk_command(message: Message, is_global: bool, remove: bool = 
         saved = await _save_afk_entry(message.from_user.id, message.chat.id, reason, is_global, media_payload, username=message.from_user.username)
         if saved:
             user_name = message.from_user.first_name or message.from_user.username or "User"
-            card = _afk_card(user_name, "Now", _format_since_time(int(time.time())), reason, is_global)
+            card = _afk_card(
+                user_name,
+                "Now",
+                _format_since_time(int(time.time())),
+                reason,
+                is_global,
+                media_payload.get("media_type", "text"),
+                media_payload.get("caption", ""),
+            )
             await _send_text_message(message.chat.id, card, message.id)
         else:
             await _send_text_message(message.chat.id, "<b>⚠️ AFK mode could not be activated.</b>", message.id)
