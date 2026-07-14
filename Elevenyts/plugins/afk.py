@@ -526,7 +526,19 @@ async def _send_afk_mention(m: Message, mid: int, afk_data: dict,
 
         try:
             if media_type == "photo":
+                await m.reply_photo(
+                    photo=media_id,
+                    caption=text
+                )
+                return
             elif media_type == "video_sticker":
+                await m.reply_sticker(
+                    sticker=media_id,
+                )
+                await m.reply_text(text)
+                return
+              
+            elif media_type == "animated_sticker"
                 await m.reply_sticker(
                     sticker=media_id,
                 )
