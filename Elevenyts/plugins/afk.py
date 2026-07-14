@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _set_afk(chat_id: int, user_id: int, reason: str = "",
-                   media_file_id: str | None = None, since: float | None = None):
+                   media_type:str | None = None, media_file_id: str | None = None, since: float | None = None,):
     if not hasattr(db, "cache"):
         return None
     payload = {
@@ -38,9 +38,12 @@ async def _set_afk(chat_id: int, user_id: int, reason: str = "",
         "user_id": user_id,
         "reason": reason or "No reason given",
         "since": since or time.time(),
+        "media_type": None,
     }
     if media_file_id:
         payload["media_file_id"] = media_file_id
+    if media_type:
+        playload["media_type"] = media_type
     await db.cache.update_one(
         {"_id": f"afk_{chat_id}_{user_id}"},
         {"$set": payload},
@@ -71,16 +74,20 @@ async def _get_all_afk(chat_id: int):
 
 
 async def _set_gafk(user_id: int, reason: str = "",
-                    media_file_id: str | None = None, since: float | None = None):
+                    media_type: str | None = None, media_file_id: str | None = None, since: float | None = None,):
     if not hasattr(db, "cache"):
         return None
     payload = {
+        "chat_id": chat_id,
         "user_id": user_id,
         "reason": reason or "No reason given",
         "since": since or time.time(),
+        "media_type": None,
     }
     if media_file_id:
         payload["media_file_id"] = media_file_id
+    if media_type:
+        playload["media_type"] = media_type
     await db.cache.update_one(
         {"_id": f"gafk_{user_id}"},
         {"$set": payload},
@@ -196,6 +203,23 @@ def _get_trigger(m: Message):
 
 
 # ──────────────────────────────────────────────
+#  duplicate protection
+# ──────────────────────────────────────────────
+
+
+async def _should_notify(chat_id: int, user_id: int):
+    key = f"{chat_id}:{user_id}"
+
+    now = time.time()
+
+    last = _afk_notify_cache.get(key)
+
+    if last and now - last < 5:
+        return False
+
+    _afk_notify_cache[key] = now
+    return True
+# ──────────────────────────────────────────────
 #  Sticker → JPEG conversion (for embedding in AFK messages)
 # ──────────────────────────────────────────────
 
@@ -306,17 +330,35 @@ async def _send_afk_notification(
                 except Exception as e:
                     logger.debug(f"send_photo (sticker jpeg) failed: {e}")
 
-        elif source_msg and (source_msg.animation or source_msg.video):
-            media = source_msg.animation or source_msg.video
-            thumbs = getattr(media, "thumbs", None)
-            if thumbs:
-                try:
-                    sent = await app.send_photo(chat_id, photo=thumbs[-1].file_id, caption=text)
-                    sent_as_photo = True
-                    if sent and sent.photo:
-                        photo_file_id = sent.photo[-1].file_id
-                except Exception as e:
-                    logger.debug(f"send_photo (anim/vid thumb) failed: {e}")
+        elif source_msg and source_msg.animation:
+
+            try:
+                sent = await app.send_animation(
+                    chat_id,
+                    animation=source_msg.animation.file_id,
+                    caption=text
+                )
+
+                if sent and sent.animation:
+                    return "animation", sent.animation.file_id
+
+            except Exception as e:
+                logger.debug(f"Animation send failed: {e}")
+
+        elif source_msg and source_msg.video:
+
+            try:
+                sent = await app.send_video(
+                    chat_id,
+                    video=source_msg.video.file_id,
+                    caption=text
+                )
+
+                if sent and sent.video:
+                    return "video", sent.video.file_id
+
+            except Exception as e:
+                logger.debug(f"Video send failed: {e}")
 
     except Exception as e:
         logger.debug(f"_send_afk_notification outer error: {e}")
@@ -330,12 +372,12 @@ async def _send_afk_notification(
     # A photo attempt was made — never also send the plain-text fallback,
     # even if we failed to capture its file_id.
     if sent_as_photo:
-        return photo_file_id
+        return "photo", photo_file_id
 
     try:
         await app.send_message(chat_id, text=text)
-    except Exception as e:
-        logger.debug(f"send_message fallback failed: {e}")
+    except Exception:
+        pass
     return None
 
 
@@ -353,12 +395,43 @@ async def _send_afk_back(
         f"ᴀɴᴅ ᴡᴀs ᴀᴡᴀʏ ꜰᴏʀ {gone_for}\n\n"
         f"• ʀᴇᴀꜱᴏɴ ➜ {reason}"
     )
+    media_type = None
+
     if stored_photo_id:
         try:
-            await app.send_photo(chat_id, photo=stored_photo_id, caption=text)
-            return
+            # Try to determine media type if it was passed separately later
+            if isinstance(stored_photo_id, dict):
+                media_type = stored_photo_id.get("media_type")
+                media_id = stored_photo_id.get("media_file_id")
+            else:
+                media_id = stored_photo_id
+
+            if media_type == "animation":
+                await app.send_animation(
+                    chat_id,
+                    animation=media_id,
+                    caption=text,
+                )
+                return
+
+            elif media_type == "video":
+                await app.send_video(
+                    chat_id,
+                    video=media_id,
+                    caption=text,
+                )
+                return
+
+            else:
+                await app.send_photo(
+                    chat_id,
+                    photo=media_id,
+                    caption=text,
+                )
+                return
+
         except Exception as e:
-            logger.debug(f"BACK send_photo failed: {e}")
+            logger.debug(f"BACK media failed: {e}")
     try:
         await app.send_message(chat_id, text=text)
     except Exception as e:
@@ -381,19 +454,40 @@ async def _send_afk_mention(m: Message, mid: int, afk_data: dict,
         f"❖ <b>{name}</b> ɪs ᴀꜰᴋ{label} since {since_at} ({gone_for})\n\n"
         f"• ʀᴇᴀꜱᴏɴ ➜ {reason}"
     )
-    photo_id = afk_data.get("media_file_id")
+    media_type = afk_data.get("media_type")
+    media_id = afk_data.get("media_file_id")
 
-    if photo_id:
+    if media_id:
+
         try:
-            await m.reply_photo(photo=photo_id, caption=text)
-            return
+            if media_type == "photo":
+                await m.reply_photo(
+                    photo=media_id,
+                    caption=text
+                )
+                return
+
+            elif media_type == "animation":
+                await m.reply_animation(
+                    animation=media_id,
+                    caption=text
+                )
+                return
+
+            elif media_type == "video":
+                await m.reply_video(
+                    video=media_id,
+                    caption=text
+                )
+                return
+
         except Exception as e:
-            logger.debug(f"AFK mention photo failed: {e}")
+            logger.debug(f"AFK media failed: {e}")
 
     try:
         await m.reply_text(text)
     except Exception as e:
-        logger.debug(f"AFK mention notify failed: {e}")
+        logger.debug(f"AFK text failed: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -443,13 +537,64 @@ async def _process_afk_set(m: Message, source_msg: Message | None,
         f"• ʀᴇᴀꜱᴏɴ ➜ {reason}"
     )
 
-    stored_photo_id = await _send_afk_notification(chat_id, afk_text, source_msg)
+    stored_file_id = None
+    media_type = None
 
-    if stored_photo_id:
+    if source_msg:
+        if source_msg.photo:
+            media_type = "photo"
+
+        elif source_msg.sticker:
+            media_type = "photo"   # sticker converted to image
+
+        elif source_msg.animation:
+            media_type = "animation"
+
+        elif source_msg.video:
+            media_type = "video"
+
+    media_type, stored_file_id = await _send_afk_notification(
+        chat_id,
+        afk_text,
+        source_msg,
+    )
+
+    if stored_file_id:
+
+        if media_type is None:
+
+            if source_msg:
+
+                if source_msg.photo:
+                    media_type = "photo"
+
+                elif source_msg.sticker:
+                    media_type = "photo"
+
+                elif source_msg.animation:
+                    media_type = "animation"
+
+                elif source_msg.video:
+                    media_type = "video"
+
         if not is_global:
-            await db.set_afk(chat_id, user_id, reason, media_file_id=stored_photo_id)
+
+            await db.set_afk(
+                chat_id=chat_id,
+                user_id=user_id,
+                reason=reason,
+                media_type=media_type,
+                media_file_id=stored_file_id,
+            )
+
         else:
-            await db.set_gafk(user_id, reason, media_file_id=stored_photo_id)
+
+            await db.set_gafk(
+                user_id=user_id,
+                reason=reason,
+                media_type=media_type,
+                media_file_id=stored_file_id,
+            )
 
 
 # ──────────────────────────────────────────────
@@ -543,8 +688,16 @@ async def afk_unset(_, m: Message):
     except Exception:
         pass
 
-    await _send_afk_back(chat_id, m.from_user.first_name or "User",
-                          reason, gone_for, photo_id)
+    await _send_afk_back(
+        chat_id,
+        name,
+        reason,
+        gone_for,
+        {
+            "media_type": local_afk.get("media_type"),
+            "media_file_id": local_afk.get("media_file_id"),
+        },
+    )
     raise pyrogram.StopPropagation
 
 
@@ -578,8 +731,16 @@ async def gafk_unset(_, m: Message):
     except Exception:
         pass
 
-    await _send_afk_back(chat_id, m.from_user.first_name or "User",
-                          reason, gone_for, photo_id, is_global=True)
+    await _send_afk_back(
+        chat_id,
+        name,
+        reason,
+        gone_for,
+        {
+            "media_type": local_afk.get("media_type"),
+            "media_file_id": local_afk.get("media_file_id"),
+        },
+    )
     raise pyrogram.StopPropagation
 
 
@@ -643,7 +804,16 @@ async def afk_watcher(_, m: Message):
         reason = local_afk.get("reason", "No reason given")
         photo_id = local_afk.get("media_file_id")
         await db.remove_afk(chat_id, user_id)
-        await _send_afk_back(chat_id, name, reason, gone_for, photo_id)
+        await _send_afk_back(
+            chat_id,
+            name,
+            reason,
+            gone_for,
+            {
+                "media_type": local_afk.get("media_type"),
+                "media_file_id": local_afk.get("media_file_id"),
+            },
+        )
 
     # 2. Sender came back from GLOBAL AFK
     global_afk = await db.get_gafk(user_id)
@@ -652,7 +822,16 @@ async def afk_watcher(_, m: Message):
         reason = global_afk.get("reason", "No reason given")
         photo_id = global_afk.get("media_file_id")
         await db.remove_gafk(user_id)
-        await _send_afk_back(chat_id, name, reason, gone_for, photo_id, is_global=True)
+        await _send_afk_back(
+            chat_id,
+            name,
+            reason,
+            gone_for,
+            {
+                "media_type": local_afk.get("media_type"),
+                "media_file_id": local_afk.get("media_file_id"),
+            },
+        )
 
     # 3. Mentioned/replied-to user is AFK
     mentioned_ids: list[int] = []
@@ -661,19 +840,30 @@ async def afk_watcher(_, m: Message):
             if entity.type == MessageEntityType.TEXT_MENTION and entity.user:
                 mentioned_ids.append(entity.user.id)
             elif entity.type == MessageEntityType.MENTION:
+
                 text = m.text or m.caption or ""
-                username = text[entity.offset:entity.offset + entity.length]
-                if username:
-                    try:
-                        user = await app.get_users(username)
-                        if user:
-                            mentioned_ids.append(user.id)
-                    except Exception:
-                        pass
+
+                username = text[
+                    entity.offset:
+                    entity.offset + entity.length
+                ]
+
+                username = username.lstrip("@")
+
+                try:
+                    user = await app.get_users(username)
+
+                    if user:
+                        mentioned_ids.append(user.id)
+
+                except Exception:
+                    pass
     if m.reply_to_message and m.reply_to_message.from_user:
         mentioned_ids.append(m.reply_to_message.from_user.id)
 
     for mid in set(mentioned_ids):
+        if not await _should_notify(chat_id, mid):
+            continue
         if mid == user_id:
             continue
         mid_local = await db.get_afk(chat_id, mid)
