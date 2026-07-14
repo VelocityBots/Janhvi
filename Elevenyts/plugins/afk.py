@@ -397,10 +397,10 @@ async def _send_afk_notification(
                     )
 
                     if os.path.exists(tgs_path):
-                    os.remove(tgs_path)
+                        os.remove(tgs_path)
 
                     if os.path.exists(gif_path):
-                    os.remove(gif_path)
+                        os.remove(gif_path)
 
                     return "animation", sent.animation.file_id
 
