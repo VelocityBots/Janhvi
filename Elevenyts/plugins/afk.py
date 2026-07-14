@@ -36,6 +36,10 @@ async def _get_collection(name: str):
         return None
 
 
+def _is_collection_available(collection: Any) -> bool:
+    return collection is not None
+
+
 async def _normalize_afk_document(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not doc:
         return None
@@ -55,7 +59,7 @@ async def _normalize_afk_document(doc: Optional[Dict[str, Any]]) -> Optional[Dic
 async def _save_afk_entry(user_id: int, chat_id: int, reason: str, is_global: bool, media_payload: Dict[str, Any], username: Optional[str] = None) -> bool:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not collection:
+        if not _is_collection_available(collection):
             return False
         payload = {
             "user_id": user_id,
@@ -82,7 +86,7 @@ async def _save_afk_entry(user_id: int, chat_id: int, reason: str, is_global: bo
 async def _remove_afk_entry(user_id: int, chat_id: int, is_global: bool) -> bool:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not collection:
+        if not _is_collection_available(collection):
             return False
         query = {"user_id": user_id}
         if is_global:
@@ -99,7 +103,7 @@ async def _remove_afk_entry(user_id: int, chat_id: int, is_global: bool) -> bool
 async def _get_afk_entry(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not collection:
+        if not _is_collection_available(collection):
             return None
         local_doc = await collection.find_one({"user_id": user_id, "is_global": False, "chat_id": chat_id})
         if local_doc:
@@ -114,7 +118,7 @@ async def _get_afk_entry(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]
 async def _list_afk_entries(chat_id: int) -> List[Dict[str, Any]]:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not collection:
+        if not _is_collection_available(collection):
             return []
         docs = []
         async for doc in collection.find({"$or": [{"is_global": True}, {"chat_id": chat_id}]}).sort("time", 1):
@@ -128,7 +132,7 @@ async def _list_afk_entries(chat_id: int) -> List[Dict[str, Any]]:
 async def _store_notification_cache(sender_id: int, afk_user_id: int, chat_id: int, message_id: int) -> None:
     try:
         collection = await _get_collection(NOTIFICATION_COLLECTION)
-        if not collection:
+        if not _is_collection_available(collection):
             return
         payload = {
             "sender_id": sender_id,
@@ -149,7 +153,7 @@ async def _store_notification_cache(sender_id: int, afk_user_id: int, chat_id: i
 async def _is_duplicate_notification(sender_id: int, afk_user_id: int, chat_id: int, message_id: int) -> bool:
     try:
         collection = await _get_collection(NOTIFICATION_COLLECTION)
-        if not collection:
+        if not _is_collection_available(collection):
             return False
         doc = await collection.find_one({
             "sender_id": sender_id,
