@@ -27,6 +27,9 @@ from Elevenyts import app, db, logger
 AFK_COLLECTION = "afk"
 NOTIFICATION_COLLECTION = "afk_notifications"
 
+AFK_MEMORY_STORE: Dict[Tuple[int, bool, Optional[int]], Dict[str, Any]] = {}
+AFK_NOTIFICATION_MEMORY_STORE: Dict[Tuple[int, int, int, int], Dict[str, Any]] = {}
+
 
 async def _get_collection(name: str):
     try:
@@ -38,6 +41,22 @@ async def _get_collection(name: str):
 
 def _is_collection_available(collection: Any) -> bool:
     return collection is not None
+
+
+def _get_memory_store(name: str) -> Dict[Any, Dict[str, Any]]:
+    if name == AFK_COLLECTION:
+        return AFK_MEMORY_STORE
+    if name == NOTIFICATION_COLLECTION:
+        return AFK_NOTIFICATION_MEMORY_STORE
+    return {}
+
+
+def _build_afk_memory_key(user_id: int, chat_id: int, is_global: bool) -> Tuple[int, bool, Optional[int]]:
+    return (user_id, is_global, None if is_global else chat_id)
+
+
+def _build_notification_memory_key(sender_id: int, afk_user_id: int, chat_id: int, message_id: int) -> Tuple[int, int, int, int]:
+    return (sender_id, afk_user_id, chat_id, message_id)
 
 
 async def _normalize_afk_document(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -58,9 +77,6 @@ async def _normalize_afk_document(doc: Optional[Dict[str, Any]]) -> Optional[Dic
 
 async def _save_afk_entry(user_id: int, chat_id: int, reason: str, is_global: bool, media_payload: Dict[str, Any], username: Optional[str] = None) -> bool:
     try:
-        collection = await _get_collection(AFK_COLLECTION)
-        if not _is_collection_available(collection):
-            return False
         payload = {
             "user_id": user_id,
             "chat_id": chat_id if not is_global else None,
@@ -72,11 +88,15 @@ async def _save_afk_entry(user_id: int, chat_id: int, reason: str, is_global: bo
             "caption": media_payload.get("caption", ""),
             "username": username or "",
         }
-        await collection.update_one(
-            {"user_id": user_id, "is_global": is_global, "chat_id": None if is_global else chat_id},
-            {"$set": payload},
-            upsert=True,
-        )
+        collection = await _get_collection(AFK_COLLECTION)
+        if _is_collection_available(collection):
+            await collection.update_one(
+                {"user_id": user_id, "is_global": is_global, "chat_id": None if is_global else chat_id},
+                {"$set": payload},
+                upsert=True,
+            )
+        else:
+            AFK_MEMORY_STORE[_build_afk_memory_key(user_id, chat_id, is_global)] = payload
         return True
     except Exception as exc:
         logger.exception("Failed to save AFK entry: %s", exc)
@@ -86,14 +106,16 @@ async def _save_afk_entry(user_id: int, chat_id: int, reason: str, is_global: bo
 async def _remove_afk_entry(user_id: int, chat_id: int, is_global: bool) -> bool:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not _is_collection_available(collection):
-            return False
-        query = {"user_id": user_id}
-        if is_global:
-            query["is_global"] = True
+        if _is_collection_available(collection):
+            query = {"user_id": user_id}
+            if is_global:
+                query["is_global"] = True
+            else:
+                query["chat_id"] = chat_id
+            await collection.delete_one(query)
         else:
-            query["chat_id"] = chat_id
-        await collection.delete_one(query)
+            key = _build_afk_memory_key(user_id, chat_id, is_global)
+            AFK_MEMORY_STORE.pop(key, None)
         return True
     except Exception as exc:
         logger.exception("Failed to remove AFK entry: %s", exc)
@@ -103,12 +125,17 @@ async def _remove_afk_entry(user_id: int, chat_id: int, is_global: bool) -> bool
 async def _get_afk_entry(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not _is_collection_available(collection):
-            return None
-        local_doc = await collection.find_one({"user_id": user_id, "is_global": False, "chat_id": chat_id})
+        if _is_collection_available(collection):
+            local_doc = await collection.find_one({"user_id": user_id, "is_global": False, "chat_id": chat_id})
+            if local_doc:
+                return await _normalize_afk_document(local_doc)
+            global_doc = await collection.find_one({"user_id": user_id, "is_global": True})
+            return await _normalize_afk_document(global_doc)
+
+        local_doc = AFK_MEMORY_STORE.get(_build_afk_memory_key(user_id, chat_id, False))
         if local_doc:
             return await _normalize_afk_document(local_doc)
-        global_doc = await collection.find_one({"user_id": user_id, "is_global": True})
+        global_doc = AFK_MEMORY_STORE.get(_build_afk_memory_key(user_id, chat_id, True))
         return await _normalize_afk_document(global_doc)
     except Exception as exc:
         logger.exception("Failed to fetch AFK entry: %s", exc)
@@ -118,12 +145,14 @@ async def _get_afk_entry(user_id: int, chat_id: int) -> Optional[Dict[str, Any]]
 async def _list_afk_entries(chat_id: int) -> List[Dict[str, Any]]:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not _is_collection_available(collection):
-            return []
-        docs = []
-        async for doc in collection.find({"$or": [{"is_global": True}, {"chat_id": chat_id}]}).sort("time", 1):
-            docs.append(await _normalize_afk_document(doc))
-        return [doc for doc in docs if doc]
+        if _is_collection_available(collection):
+            docs = []
+            async for doc in collection.find({"$or": [{"is_global": True}, {"chat_id": chat_id}]}).sort("time", 1):
+                docs.append(await _normalize_afk_document(doc))
+            return [doc for doc in docs if doc]
+
+        docs = [doc for doc in AFK_MEMORY_STORE.values() if doc.get("is_global") or doc.get("chat_id") == chat_id]
+        return [await _normalize_afk_document(doc) for doc in docs if await _normalize_afk_document(doc)]
     except Exception as exc:
         logger.exception("Failed to list AFK entries: %s", exc)
         return []
@@ -131,9 +160,6 @@ async def _list_afk_entries(chat_id: int) -> List[Dict[str, Any]]:
 
 async def _store_notification_cache(sender_id: int, afk_user_id: int, chat_id: int, message_id: int) -> None:
     try:
-        collection = await _get_collection(NOTIFICATION_COLLECTION)
-        if not _is_collection_available(collection):
-            return
         payload = {
             "sender_id": sender_id,
             "afk_user_id": afk_user_id,
@@ -141,11 +167,15 @@ async def _store_notification_cache(sender_id: int, afk_user_id: int, chat_id: i
             "message_id": message_id,
             "expires_at": int(time.time()) + 300,
         }
-        await collection.replace_one(
-            {"sender_id": sender_id, "afk_user_id": afk_user_id, "chat_id": chat_id, "message_id": message_id},
-            payload,
-            upsert=True,
-        )
+        collection = await _get_collection(NOTIFICATION_COLLECTION)
+        if _is_collection_available(collection):
+            await collection.replace_one(
+                {"sender_id": sender_id, "afk_user_id": afk_user_id, "chat_id": chat_id, "message_id": message_id},
+                payload,
+                upsert=True,
+            )
+        else:
+            AFK_NOTIFICATION_MEMORY_STORE[_build_notification_memory_key(sender_id, afk_user_id, chat_id, message_id)] = payload
     except Exception as exc:
         logger.exception("Failed to cache AFK notification: %s", exc)
 
@@ -153,16 +183,20 @@ async def _store_notification_cache(sender_id: int, afk_user_id: int, chat_id: i
 async def _is_duplicate_notification(sender_id: int, afk_user_id: int, chat_id: int, message_id: int) -> bool:
     try:
         collection = await _get_collection(NOTIFICATION_COLLECTION)
-        if not _is_collection_available(collection):
-            return False
-        doc = await collection.find_one({
-            "sender_id": sender_id,
-            "afk_user_id": afk_user_id,
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "expires_at": {"$gt": int(time.time())},
-        })
-        return bool(doc)
+        if _is_collection_available(collection):
+            doc = await collection.find_one({
+                "sender_id": sender_id,
+                "afk_user_id": afk_user_id,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "expires_at": {"$gt": int(time.time())},
+            })
+            return bool(doc)
+
+        doc = AFK_NOTIFICATION_MEMORY_STORE.get(_build_notification_memory_key(sender_id, afk_user_id, chat_id, message_id))
+        if doc:
+            return int(doc.get("expires_at", 0)) > int(time.time())
+        return False
     except Exception as exc:
         logger.exception("Failed to detect duplicate AFK notification: %s", exc)
         return False
@@ -374,11 +408,14 @@ async def _resolve_mention_targets(message: Message) -> List[int]:
 async def _find_user_by_username(username: str) -> Optional[int]:
     try:
         collection = await _get_collection(AFK_COLLECTION)
-        if not collection:
-            return None
-        doc = await collection.find_one({"username": username})
-        if doc:
-            return int(doc.get("user_id", 0))
+        if _is_collection_available(collection):
+            doc = await collection.find_one({"username": username})
+            if doc:
+                return int(doc.get("user_id", 0))
+
+        for doc in AFK_MEMORY_STORE.values():
+            if str(doc.get("username", "")).lower() == str(username).lower():
+                return int(doc.get("user_id", 0))
     except Exception:
         pass
     return None
@@ -510,27 +547,27 @@ async def _handle_regular_message(message: Message) -> None:
         logger.exception("Welcome back handling failed: %s", exc)
 
 
-@app.on_message(filters.command(["afk"], prefixes="/.!"))
+@app.on_message(filters.command(["afk"], prefixes=["/", ".", "!"]))
 async def afk_handler(client, message: Message):
     await _handle_afk_command(message, is_global=False, remove=False)
 
 
-@app.on_message(filters.command(["gafk"], prefixes="/.!"))
+@app.on_message(filters.command(["gafk"], prefixes=["/", ".", "!"]))
 async def gafk_handler(client, message: Message):
     await _handle_afk_command(message, is_global=True, remove=False)
 
 
-@app.on_message(filters.command(["unafk"], prefixes="/.!"))
+@app.on_message(filters.command(["unafk"], prefixes=["/", ".", "!"]))
 async def unafk_handler(client, message: Message):
     await _handle_afk_command(message, is_global=False, remove=True)
 
 
-@app.on_message(filters.command(["ungafk"], prefixes="/.!"))
+@app.on_message(filters.command(["ungafk"], prefixes=["/", ".", "!"]))
 async def ungafk_handler(client, message: Message):
     await _handle_afk_command(message, is_global=True, remove=True)
 
 
-@app.on_message(filters.command(["afklist"], prefixes="/.!"))
+@app.on_message(filters.command(["afklist"], prefixes=["/", ".", "!"]))
 async def afklist_handler(client, message: Message):
     await _handle_afk_list(message)
 
