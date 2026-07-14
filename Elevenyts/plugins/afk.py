@@ -46,7 +46,7 @@ async def _set_afk(chat_id: int, user_id: int, reason: str = "",
     if media_file_id:
         payload["media_file_id"] = media_file_id
     if media_type:
-        playload["media_type"] = media_type
+        payload["media_type"] = media_type
     await db.cache.update_one(
         {"_id": f"afk_{chat_id}_{user_id}"},
         {"$set": payload},
@@ -90,7 +90,7 @@ async def _set_gafk(user_id: int, reason: str = "",
     if media_file_id:
         payload["media_file_id"] = media_file_id
     if media_type:
-        playload["media_type"] = media_type
+        payload["media_type"] = media_type
     await db.cache.update_one(
         {"_id": f"gafk_{user_id}"},
         {"$set": payload},
