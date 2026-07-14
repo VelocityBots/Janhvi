@@ -329,27 +329,56 @@ async def _send_afk_notification(
 
             sticker = source_msg.sticker
 
-            # Static Sticker
-            if not sticker.is_video and not sticker.is_animated:
+            # Animated Sticker
+            if sticker.is_animated:
+                try:
+                  sent = await app.send_sticker(
+                      chat_id,
+                      sticker=sticker.file_id
+                  )
 
-                jpg_path = await _sticker_to_jpeg(source_msg)
+                  await app.send_message(chat_id, text)
 
-                if jpg_path:
-                    try:
-                        sent = await app.send_photo(
-                            chat_id,
-                            photo=jpg_path,
-                            caption=text,
-                        )
+                  return "animated_sticker", sticker.file_id
 
-                        sent_as_photo = True
+              except Exception as e:
+                  logger.debug(e)
 
-                        if sent.photo:
-                            return "photo", sent.photo[-1].file_id
+           # Video Sticker
+           elif sticker.is_video:
+               try:
+                   sent = await app.send_sticker(
+                       chat_id,
+                       sticker=sticker.file_id
+                   )
 
-                    except Exception as e:
-                        logger.debug(e)
+                   await app.send_message(chat_id, text)
 
+                   return "video_sticker", sticker.file_id
+
+               except Exception as e:
+                   logger.debug(e)
+
+         # Static Sticker
+         else:
+
+             jpg_path = await _sticker_to_jpeg(source_msg)
+
+             if jpg_path:
+
+                 try:
+
+                     sent = await app.send_photo(
+                         chat_id,
+                         photo=jpg_path,
+                         caption=text
+                     )
+
+                     if sent.photo:
+                         return "photo", sent.photo[-1].file_id
+
+                 except Exception as e:
+                     logger.debug(e)
             
 
         elif source_msg and source_msg.animation:
@@ -408,7 +437,7 @@ async def _send_afk_back(
     name: str,
     reason: str,
     gone_for: str,
-    stored_photo_id: str | None,
+    stored_media: str | None,
     is_global: bool = False,
 ) -> None:
     label = " [ɢʟᴏʙᴀʟ ᴀꜰᴋ]" if is_global else ""
@@ -419,12 +448,12 @@ async def _send_afk_back(
     )
     media_type = None
 
-    if stored_photo_id:
+    if stored_media:
         try:
             # Try to determine media type if it was passed separately later
-            if isinstance(stored_photo_id, dict):
-                media_type = stored_photo_id.get("media_type")
-                media_id = stored_photo_id.get("media_file_id")
+            if isinstance(stored_media, dict):
+                media_type = stored_media.get("media_type")
+                media_id = stored_media.get("media_file_id")
             else:
                 media_id = stored_photo_id
 
@@ -616,22 +645,6 @@ async def _process_afk_set(m: Message, source_msg: Message | None,
 
     if stored_file_id:
 
-        if media_type is None:
-
-            if source_msg:
-
-                if source_msg.photo:
-                    media_type = "photo"
-
-                elif source_msg.sticker:
-                    media_type = "photo"
-
-                elif source_msg.animation:
-                    media_type = "animation"
-
-                elif source_msg.video:
-                    media_type = "video"
-
         if not is_global:
 
             await db.set_afk(
@@ -767,7 +780,7 @@ async def gafk_unset(_, m: Message):
         return
 
     user_id = m.from_user.id
-    name=m.from_user.first_name or "User",
+    name=m.from_user.first_name or "User"
     chat_id = m.chat.id
     gafk_data = await db.get_gafk(user_id)
 
@@ -885,9 +898,10 @@ async def afk_watcher(_, m: Message):
             reason,
             gone_for,
             {
-                "media_type": local_afk.get("media_type"),
-                "media_file_id": local_afk.get("media_file_id"),
+                "media_type": global_afk.get("media_type"),
+                "media_file_id": global_afk.get("media_file_id"),
             },
+            is_global=True
         )
 
     # 3. Mentioned/replied-to user is AFK
