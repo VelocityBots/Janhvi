@@ -19,8 +19,7 @@ from pyrogram import filters
 from pyrogram.enums import MessageEntityType, ParseMode
 from pyrogram.types import Message
 
-from Elevenyts import app
-from Elevenyts.misc import db
+from Elevenyts import app, db
 
 # ---------------------------------------------------------------------------
 # Constants
