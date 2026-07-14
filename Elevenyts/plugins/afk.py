@@ -250,29 +250,28 @@ def _format_media_caption(media_type: str, caption: str) -> str:
 
 def _afk_card(name_html: str, duration: str, since: str, reason: str, is_global: bool, media_type: Optional[str] = None, media_caption: Optional[str] = None) -> str:
     label = " [ɢʟᴏʙᴀʟ]" if is_global else ""
-    reason = reason.strip() or "None"
+    reason = reason.strip() or "No reason provided"
     media_section = _format_media_caption(media_type or "", media_caption or "")
     return (
         f"{DIVIDER}\n"
-        f"<b>💤 AFK MODE{label}</b>\n\n"
-        f"<b>👤 User:</b>\n{name_html}\n\n"
-        f"<b>⏱ Away:</b>\n{duration}\n\n"
-        f"<b>📅 Since:</b>\n{since}\n\n"
-        f"<b>📝 Reason:</b>\n{reason}\n"
+        f"<b>{name_html}</b>{label} is now AFK\n\n"
+        f"<b>⏱ Away:</b> {duration}\n"
+        f"<b>📅 Since:</b> {since}\n"
+        f"<b>📝 Reason:</b> {reason}\n"
         f"{media_section}"
         f"{DIVIDER}"
     )
 
 
 def _welcome_back_card(name_html: str, duration: str, reason: str, media_type: Optional[str] = None, media_caption: Optional[str] = None) -> str:
-    reason = reason.strip() or "None"
+    reason = reason.strip() or "No reason provided"
     media_section = _format_media_caption(media_type or "", media_caption or "")
     return (
         f"{DIVIDER}\n"
         f"<b>✨ Welcome Back</b>\n\n"
-        f"<b>👤</b> {name_html}\n\n"
-        f"<b>⏱ AFK Time</b>\n{duration}\n\n"
-        f"<b>📝 Reason</b>\n{reason}\n"
+        f"<b>{name_html}</b> is back!\n\n"
+        f"<b>⏱ AFK Time:</b> {duration}\n"
+        f"<b>📝 Reason:</b> {reason}\n"
         f"{media_section}"
         f"{DIVIDER}"
     )
@@ -306,7 +305,7 @@ async def _send_text_message(chat_id: int, text: str, reply_to: int, parse_mode:
     )
 
 
-def _extract_media_data(message: Message) -> Dict[str, Any]:
+async def _extract_media_data(message: Message) -> Dict[str, Any]:
     if message.photo:
         return {"media_type": "photo", "media_file_id": message.photo.file_id, "caption": message.caption or ""}
     if message.video:
@@ -317,7 +316,11 @@ def _extract_media_data(message: Message) -> Dict[str, Any]:
         return {"media_type": "audio", "media_file_id": message.audio.file_id, "caption": message.caption or ""}
     if message.voice:
         return {"media_type": "voice", "media_file_id": message.voice.file_id, "caption": message.caption or ""}
-    if message.document and not (getattr(message.document, "mime_type", "") == "image/webp") and not getattr(message, "sticker", None):
+    if message.sticker:
+        converted = await _sticker_to_jpeg(app, message.sticker)
+        if converted:
+            return {"media_type": "photo", "media_file_id": converted, "caption": message.caption or ""}
+    if message.document and not getattr(message.document, "mime_type", "") == "image/webp":
         return {"media_type": "document", "media_file_id": message.document.file_id, "caption": message.caption or ""}
     if message.text or message.caption:
         return {"media_type": "text", "media_file_id": "", "caption": message.text or message.caption or ""}
@@ -344,11 +347,21 @@ async def _send_afk_media(chat_id: int, reply_to: int, media_payload: Dict[str, 
     return await _send_text_message(chat_id, caption or "", reply_to)
 
 
-async def _send_welcome_back(chat_id: int, reply_to: int, user: Any, reason: str, duration: str) -> None:
+async def _send_welcome_back(chat_id: int, reply_to: int, user: Any, reason: str, duration: str, media_payload: Optional[Dict[str, Any]] = None) -> None:
     try:
         display_name = user.first_name if user and getattr(user, "first_name", None) else "User"
-        card = _welcome_back_card(_mention(user), duration, reason)
-        await _send_text_message(chat_id, card, reply_to)
+        media_type = media_payload.get("media_type", "text") if media_payload else "text"
+        caption = _welcome_back_card(
+            _mention(user),
+            duration,
+            reason,
+            media_payload.get("media_type", "text") if media_payload else "text",
+            media_payload.get("caption", "") if media_payload else "",
+        )
+        if media_payload and media_type != "text":
+            await _send_afk_media(chat_id, reply_to, media_payload, caption_override=caption)
+        else:
+            await _send_text_message(chat_id, caption, reply_to)
     except Exception as exc:
         logger.exception("Failed to send welcome back card: %s", exc)
 
@@ -674,16 +687,14 @@ async def _run_welcome_back(client, message: Message, user, *, force_local=False
     if remove_global and global_entry:
         await _remove_afk_entry(user_id, chat_id, True)
 
-    text = _welcome_back_card(
-        _mention(user),
-        duration,
-        reason,
-        media_payload.get("media_type", "text"),
-        media_payload.get("caption", ""),
+    await _send_welcome_back(
+        chat_id=chat_id,
+        reply_to=message.id,
+        user=user,
+        reason=reason,
+        duration=duration,
+        media_payload=media_payload,
     )
-    await _send_welcome_back(chat_id=chat_id, reply_to=message.id, user=user, reason=reason, duration=duration)
-    if media_payload.get("media_type", "text") != "text":
-        await _send_afk_media(chat_id, message.id, media_payload, caption_override=text)
     return True
 
 
@@ -739,7 +750,10 @@ async def _handle_afk_command(message: Message, is_global: bool, remove: bool = 
                 media_payload.get("media_type", "text"),
                 media_payload.get("caption", ""),
             )
-            await _send_text_message(message.chat.id, card, message.id)
+            if media_payload.get("media_type", "text") == "text":
+                await _send_text_message(message.chat.id, card, message.id)
+            else:
+                await _send_afk_media(message.chat.id, message.id, media_payload, caption_override=card)
         else:
             await _send_text_message(message.chat.id, "<b>⚠️ AFK mode could not be activated.</b>", message.id)
     except Exception as exc:
@@ -780,13 +794,19 @@ async def _handle_regular_message(message: Message) -> None:
             return
         await _remove_afk_entry(message.from_user.id, message.chat.id, bool(afk_entry.get("is_global", False)))
         duration_label = _format_duration(int(time.time()) - int(afk_entry.get("time", int(time.time()))))
-        await _send_welcome_back(message.chat.id, message.id, message.from_user, afk_entry.get("reason", "No reason provided"), duration_label)
-        if afk_entry.get("media_type", "text") != "text":
-            await _send_afk_media(message.chat.id, message.id, {
-                "media_type": afk_entry.get("media_type", "text"),
-                "media_file_id": afk_entry.get("media_file_id", ""),
-                "caption": afk_entry.get("caption", ""),
-            })
+        media_payload = {
+            "media_type": afk_entry.get("media_type", "text"),
+            "media_file_id": afk_entry.get("media_file_id", ""),
+            "caption": afk_entry.get("caption", ""),
+        }
+        await _send_welcome_back(
+            message.chat.id,
+            message.id,
+            message.from_user,
+            afk_entry.get("reason", "No reason provided"),
+            duration_label,
+            media_payload=media_payload,
+        )
     except Exception as exc:
         logger.exception("Welcome back handling failed: %s", exc)
 
