@@ -356,56 +356,7 @@ async def _send_afk_notification(
                     except Exception as e:
                         logger.debug(e)
 
-            # Video Sticker (.webm)
-            elif sticker.is_video:
-
-                try:
-                    sent = await app.send_sticker(
-                        chat_id,
-                        sticker=sticker.file_id,
-                    )
-
-                    await app.send_message(chat_id, text)
-
-                    return "video_sticker", sticker.file_id
-
-                except Exception as e:
-                    logger.debug(e)
-
-            # Animated Sticker (.tgs)
-
-            elif sticker.is_animated:
-
-                try:
-                    tgs_path = await app.download_media(sticker.file_id)
-
-                    gif_path = tgs_path.replace(".tgs", ".gif")
-
-                    subprocess.run(
-                        [
-                            "lottie_convert.py",
-                            tgs_path,
-                            gif_path,
-                        ],
-                        check=True,
-                    )
-
-                    sent = await app.send_animation(
-                        chat_id,
-                        animation=gif_path,
-                        caption=text,
-                    )
-
-                    if os.path.exists(tgs_path):
-                        os.remove(tgs_path)
-
-                    if os.path.exists(gif_path):
-                        os.remove(gif_path)
-
-                    return "animation", sent.animation.file_id
-
-                except Exception as e:
-                    logger.debug(f"Animated sticker conversion failed: {e}")
+            
 
         elif source_msg and source_msg.animation:
 
