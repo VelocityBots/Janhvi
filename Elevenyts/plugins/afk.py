@@ -633,4 +633,18 @@ async def afk_watcher(client, message: Message):
 
         # Atomic claim per (chat, user) with short TTL — prevents dupes across
         # local + global simultaneous entries.
-        if not await _claim_afk_notification(message.chat.id, targe
+        if not await _claim_afk_notification(message.chat.id, target.id, ttl=5):
+            notified.add(target.id)
+            continue
+
+        started = float(record.get("time") or record.get("since") or time.time())
+        reason = record.get("reason") or ""
+        media_file_id = record.get("media_file_id")
+
+        duration = _format_duration(time.time() - started)
+        since = _format_since_time(started)
+
+        text = _afk_card(_mention(target), duration, since, reason, is_global)
+        await _send_afk_reply(message, text, media_file_id)
+
+        notified.add(target.id)
