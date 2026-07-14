@@ -329,56 +329,48 @@ async def _send_afk_notification(
 
             sticker = source_msg.sticker
 
-            # Animated Sticker
             if sticker.is_animated:
                 try:
-                  sent = await app.send_sticker(
-                      chat_id,
-                      sticker=sticker.file_id
-                  )
-
-                  await app.send_message(chat_id, text)
-
-                  return "animated_sticker", sticker.file_id
-
-              except Exception as e:
-                  logger.debug(e)
-
-           # Video Sticker
-           elif sticker.is_video:
-               try:
-                   sent = await app.send_sticker(
+                    sent = await app.send_sticker(
                        chat_id,
-                       sticker=sticker.file_id
-                   )
+                        sticker=sticker.file_id
+                    )
 
-                   await app.send_message(chat_id, text)
+                    await app.send_message(chat_id, text)
 
-                   return "video_sticker", sticker.file_id
+                    return "animated_sticker", sticker.file_id
+                
+                except Exception as e:
+                    logger.debug(e)
+            elif sticker.is_video:
+                try:
+                    sent = await app.send_sticker(
+                        chat_id,
+                        sticker=sticker.file_id
+                    )
 
-               except Exception as e:
-                   logger.debug(e)
+                    await app.send_message(chat_id, text)
 
-         # Static Sticker
-         else:
+                    return "video_sticker", sticker.file_id
+                except Exception as e:
+                    logger.debug(e)
+                
+            else:
+                jpg_path = await _sticker_to_jpeg(source_msg)
+                
+                if jpg_path:
+                    try:
+                        sent = await app.send_photo(
+                            chat_id,
+                            photo=jpg_path,
+                            caption=text
+                        )
 
-             jpg_path = await _sticker_to_jpeg(source_msg)
-
-             if jpg_path:
-
-                 try:
-
-                     sent = await app.send_photo(
-                         chat_id,
-                         photo=jpg_path,
-                         caption=text
-                     )
-
-                     if sent.photo:
-                         return "photo", sent.photo[-1].file_id
-
-                 except Exception as e:
-                     logger.debug(e)
+                        if sent.photo:
+                            return "photo", sent.photo[-1].file_id
+                    
+                    except Exception as e:
+                        logger.debug(e)
             
 
         elif source_msg and source_msg.animation:
