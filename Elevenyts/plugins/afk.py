@@ -730,9 +730,9 @@ async def _handle_afk_command(message: Message, is_global: bool, remove: bool = 
         elif text:
             reason = text
 
-        media_payload = _extract_media_data(message)
+        media_payload = await _extract_media_data(message)
         if message.reply_to_message:
-            reply_media = _extract_media_data(message.reply_to_message)
+            reply_media = await _extract_media_data(message.reply_to_message)
             if reply_media.get("media_type") != "text" or message.reply_to_message.text:
                 media_payload = reply_media
             elif media_payload.get("media_type") == "text":
