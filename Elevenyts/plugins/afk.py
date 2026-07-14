@@ -1,685 +1,642 @@
-# ==========================================================
-# Copyright (c) 2026 Juno X Music
-# All Rights Reserved.
-# ==========================================================
-
-import time
-import re
-from typing import Dict, List, Tuple
-# ==========================================================
-# Advanced AFK System (adapted)
-# Implements group-local AFK and global AFK using the project's DB wrapper.
-# Based on: https://github.com/bishalkumar000001/Music-Bot (ArtistMusic)
-# ==========================================================
-
 import asyncio
 import os
-import time
-import logging
-import tempfile
+import re
 import subprocess
+import time
+import uuid
+from io import BytesIO
+from typing import Optional, Tuple
 
-import pyrogram
+from PIL import Image
 from pyrogram import filters
-from pyrogram.enums import MessageEntityType
+from pyrogram.enums import MessageEntityType, ParseMode
 from pyrogram.types import Message
 
 from Elevenyts import app, db
 
-logger = logging.getLogger(__name__)
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+AFK_CMDS = ("afk", "gafk", "unafk", "ungafk", "afklist")
+DIVIDER = "━━━━━━━━━━━━━━━━━━"
+TMP_DIR = "cache"
+os.makedirs(TMP_DIR, exist_ok=True)
 
 
-async def _set_afk(chat_id: int, user_id: int, reason: str = "",
-                   media_file_id: str | None = None, since: float | None = None):
-    if not hasattr(db, "cache"):
-        return None
-    payload = {
-        "chat_id": chat_id,
-        "user_id": user_id,
-        "reason": reason or "No reason given",
-        "since": since or time.time(),
-    }
-    if media_file_id:
-        payload["media_file_id"] = media_file_id
-    await db.cache.update_one(
-        {"_id": f"afk_{chat_id}_{user_id}"},
-        {"$set": payload},
-        upsert=True,
-    )
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
 
-
-async def _get_afk(chat_id: int, user_id: int):
-    if not hasattr(db, "cache"):
-        return None
-    doc = await db.cache.find_one({"_id": f"afk_{chat_id}_{user_id}"})
-    return doc if doc else None
-
-
-async def _remove_afk(chat_id: int, user_id: int):
-    if not hasattr(db, "cache"):
-        return None
-    await db.cache.delete_one({"_id": f"afk_{chat_id}_{user_id}"})
-
-
-async def _get_all_afk(chat_id: int):
-    if not hasattr(db, "cache"):
-        return []
-    docs = []
-    async for doc in db.cache.find({"chat_id": chat_id, "_id": {"$regex": f"^afk_{chat_id}_"}}):
-        docs.append(doc)
-    return docs
-
-
-async def _set_gafk(user_id: int, reason: str = "",
-                    media_file_id: str | None = None, since: float | None = None):
-    if not hasattr(db, "cache"):
-        return None
-    payload = {
-        "user_id": user_id,
-        "reason": reason or "No reason given",
-        "since": since or time.time(),
-    }
-    if media_file_id:
-        payload["media_file_id"] = media_file_id
-    await db.cache.update_one(
-        {"_id": f"gafk_{user_id}"},
-        {"$set": payload},
-        upsert=True,
-    )
-
-
-async def _get_gafk(user_id: int):
-    if not hasattr(db, "cache"):
-        return None
-    doc = await db.cache.find_one({"_id": f"gafk_{user_id}"})
-    return doc if doc else None
-
-
-async def _remove_gafk(user_id: int):
-    if not hasattr(db, "cache"):
-        return None
-    await db.cache.delete_one({"_id": f"gafk_{user_id}"})
-
-
-if not hasattr(db, "set_afk"):
-    db.set_afk = _set_afk
-if not hasattr(db, "get_afk"):
-    db.get_afk = _get_afk
-if not hasattr(db, "remove_afk"):
-    db.remove_afk = _remove_afk
-if not hasattr(db, "get_all_afk"):
-    db.get_all_afk = _get_all_afk
-if not hasattr(db, "set_gafk"):
-    db.set_gafk = _set_gafk
-if not hasattr(db, "get_gafk"):
-    db.get_gafk = _get_gafk
-if not hasattr(db, "remove_gafk"):
-    db.remove_gafk = _remove_gafk
-
-
-# ──────────────────────────────────────────────
-#  Atomic notification claim (uses db.cache)
-# ──────────────────────────────────────────────
-
-
-async def _claim_afk_notification(chat_id: int, user_id: int) -> bool:
-    key = f"_afk_notif_{chat_id}_{user_id}"
-    try:
-        result = await db.cache.find_one_and_update(
-            {"_id": key},
-            {"$setOnInsert": {"ts": time.time()}},
-            upsert=True,
-            return_document=False,
-        )
-        if result is not None:
-            return False
-
-        async def _cleanup():
-            await asyncio.sleep(5)
-            try:
-                await db.cache.delete_one({"_id": key})
-            except Exception:
-                pass
-
-        asyncio.create_task(_cleanup())
-        return True
-    except Exception as e:
-        logger.debug(f"AFK notification claim failed: {e}")
-        return True
-
-
-# ──────────────────────────────────────────────
-#  Helpers
-# ──────────────────────────────────────────────
+def _mention(user) -> str:
+    """HTML mention anchor. Safe against missing first_name."""
+    name = (getattr(user, "first_name", None) or "User").strip() or "User"
+    # Escape minimal HTML in the visible name
+    name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f'<a href="tg://user?id={user.id}">{name}</a>'
 
 
 def _format_duration(seconds: float) -> str:
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        m, s = divmod(seconds, 60)
-        return f"{m}m {s}s"
-    elif seconds < 86400:
-        h, rem = divmod(seconds, 3600)
-        m, _ = divmod(rem, 60)
-        return f"{h}h {m}m"
-    else:
-        d, rem = divmod(seconds, 86400)
-        h, _ = divmod(rem, 3600)
-        return f"{d}d {h}h"
+    seconds = int(max(0, seconds))
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    parts = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
+    if s or not parts:
+        parts.append(f"{s}s")
+    return " ".join(parts)
 
 
-def _format_since_time(timestamp: float) -> str:
+def _format_since_time(ts: float) -> str:
     try:
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+        return time.strftime("%d %b %Y, %H:%M", time.localtime(ts))
     except Exception:
-        return "unknown time"
+        return "unknown"
 
 
-def _parse_command_and_reason(text: str):
+def _parse_command_and_reason(message: Message) -> Tuple[str, str]:
+    """Return (command, reason). Reason may be empty."""
+    text = (message.text or message.caption or "").strip()
     if not text:
-        return None, None
-    text = text.strip()
-    if not text.startswith("/"):
-        return None, None
-    parts = text.split(None, 1)
-    cmd = parts[0].lstrip("/").split("@")[0].lower()
-    if cmd not in ("afk", "gafk", "unafk", "ungafk", "afklist"):
-        return None, None
-    reason = parts[1].strip() if len(parts) > 1 else "No reason given"
+        return "", ""
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].lstrip("/").split("@", 1)[0].lower()
+    reason = parts[1].strip() if len(parts) > 1 else ""
     return cmd, reason
 
 
-def _get_trigger(m: Message):
-    return _parse_command_and_reason(m.text or m.caption or "")
+def _get_trigger(message: Message) -> str:
+    """First word (command token) without slash / bot suffix."""
+    text = (message.text or message.caption or "").strip()
+    if not text:
+        return ""
+    first = text.split(maxsplit=1)[0]
+    return first.lstrip("/").split("@", 1)[0].lower()
 
 
-# ──────────────────────────────────────────────
-#  Sticker → JPEG conversion (for embedding in AFK messages)
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Sticker → JPEG conversion (PIL primary, ffmpeg fallback)
+# ---------------------------------------------------------------------------
 
-
-async def _sticker_to_jpeg(msg: Message) -> str | None:
-    raw_path: str | None = None
+async def _sticker_to_jpeg(client, sticker) -> Optional[str]:
+    """
+    Download a sticker, convert to JPEG, upload as a photo, return the resulting
+    photo file_id. Cleans up temp files. Returns None on failure.
+    """
+    src_path = os.path.join(TMP_DIR, f"stk_{uuid.uuid4().hex}")
+    jpg_path = src_path + ".jpg"
+    downloaded = None
     try:
-        raw_path = await app.download_media(
-            msg,
-            file_name=os.path.join(
-                tempfile.gettempdir(), f"afkstk_{msg.id}_{int(time.time())}"
-            ),
-        )
-        if not raw_path or not os.path.exists(raw_path):
+        downloaded = await client.download_media(sticker.file_id, file_name=src_path)
+        if not downloaded or not os.path.exists(downloaded):
             return None
 
-        jpg_path = raw_path + ".jpg"
-
+        ok = False
+        # --- PIL path (works for .webp static stickers) ---
         try:
-            from PIL import Image
-            with Image.open(raw_path) as img:
-                try:
-                    img.seek(0)
-                except Exception:
-                    pass
-                if img.mode in ("RGBA", "LA", "P"):
-                    bg = Image.new("RGB", img.size, (255, 255, 255))
-                    converted = img.convert("RGBA")
-                    alpha = converted.split()[-1]
-                    bg.paste(converted.convert("RGB"), mask=alpha)
-                    final = bg
-                else:
-                    final = img.convert("RGB")
-                final.save(jpg_path, "JPEG", quality=85)
-            if os.path.exists(jpg_path) and os.path.getsize(jpg_path) > 100:
-                return jpg_path
-        except Exception as e:
-            logger.debug(f"PIL sticker conversion failed: {e}")
+            with Image.open(downloaded) as im:
+                im.load()
+                if im.mode != "RGB":
+                    im = im.convert("RGB")
+                im.save(jpg_path, "JPEG", quality=90)
+                ok = True
+        except Exception:
+            ok = False
 
+        # --- ffmpeg fallback (animated .webm / .tgs won't open in PIL) ---
+        if not ok:
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    [
+                        "ffmpeg", "-y", "-i", downloaded,
+                        "-vframes", "1", "-vf", "scale=512:-1",
+                        jpg_path,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                ok = (proc.returncode == 0 and os.path.exists(jpg_path))
+            except Exception:
+                ok = False
+
+        if not ok or not os.path.exists(jpg_path):
+            return None
+
+        # Upload as photo to obtain a reusable photo file_id
         try:
-            result = subprocess.run(
-                ["ffmpeg", "-y", "-i", raw_path,
-                 "-vframes", "1", "-q:v", "2", jpg_path],
-                capture_output=True, timeout=15,
+            sent = await client.send_photo(
+                chat_id="me",
+                photo=jpg_path,
+                disable_notification=True,
             )
-            if result.returncode == 0 and os.path.exists(jpg_path) and os.path.getsize(jpg_path) > 100:
-                return jpg_path
-        except Exception as e:
-            logger.debug(f"ffmpeg sticker frame extract failed: {e}")
-
-        return None
-    except Exception as e:
-        logger.debug(f"_sticker_to_jpeg outer error: {e}")
-        return None
-    finally:
-        if raw_path and os.path.exists(raw_path):
+            file_id = None
+            if sent and sent.photo:
+                file_id = sent.photo.file_id
             try:
-                os.remove(raw_path)
+                await sent.delete()
+            except Exception:
+                pass
+            return file_id
+        except Exception:
+            return None
+    finally:
+        for p in (downloaded, jpg_path):
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
             except Exception:
                 pass
 
 
-# ──────────────────────────────────────────────
-#  Core AFK notification sender
-# ──────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Media extraction from an AFK-setting message
+# ---------------------------------------------------------------------------
 
-
-async def _send_afk_notification(
-    chat_id: int,
-    text: str,
-    source_msg: Message | None = None,
-) -> str | None:
+async def _extract_afk_media(client, message: Message) -> Optional[str]:
     """
-    Send exactly ONE AFK notification message.
-
-    - If `source_msg` is a photo/sticker/animation/video, send exactly one
-      photo message (image + caption) and return its file_id.
-    - Otherwise (no reply, or reply to plain text), send exactly one plain
-      text message and return None.
-
-    `sent_as_photo` guarantees we never fall through to the plain-text
-    branch after a photo has already been delivered — this is what
-    prevents the double "one with image, one without" notification.
+    Look at the message and its reply for a supported media.
+    Returns a file_id (photo/animation/video), or a converted photo file_id
+    when a sticker is provided. None if no media.
     """
-    jpg_path: str | None = None
-    photo_file_id: str | None = None
-    sent_as_photo = False
+    candidates = [message]
+    if message.reply_to_message:
+        candidates.append(message.reply_to_message)
 
-    try:
-        if source_msg and source_msg.photo:
-            fid = source_msg.photo[-1].file_id
-            try:
-                sent = await app.send_photo(chat_id, photo=fid, caption=text)
-                sent_as_photo = True
-                if sent and sent.photo:
-                    photo_file_id = sent.photo[-1].file_id
-            except Exception as e:
-                logger.debug(f"send_photo (photo fid) failed: {e}")
-
-        elif source_msg and source_msg.sticker:
-            jpg_path = await _sticker_to_jpeg(source_msg)
-            if jpg_path:
-                try:
-                    sent = await app.send_photo(chat_id, photo=jpg_path, caption=text)
-                    sent_as_photo = True
-                    if sent and sent.photo:
-                        photo_file_id = sent.photo[-1].file_id
-                except Exception as e:
-                    logger.debug(f"send_photo (sticker jpeg) failed: {e}")
-
-        elif source_msg and (source_msg.animation or source_msg.video):
-            media = source_msg.animation or source_msg.video
-            thumbs = getattr(media, "thumbs", None)
-            if thumbs:
-                try:
-                    sent = await app.send_photo(chat_id, photo=thumbs[-1].file_id, caption=text)
-                    sent_as_photo = True
-                    if sent and sent.photo:
-                        photo_file_id = sent.photo[-1].file_id
-                except Exception as e:
-                    logger.debug(f"send_photo (anim/vid thumb) failed: {e}")
-
-    except Exception as e:
-        logger.debug(f"_send_afk_notification outer error: {e}")
-    finally:
-        if jpg_path and os.path.exists(jpg_path):
-            try:
-                os.remove(jpg_path)
-            except Exception:
-                pass
-
-    # A photo attempt was made — never also send the plain-text fallback,
-    # even if we failed to capture its file_id.
-    if sent_as_photo:
-        return photo_file_id
-
-    try:
-        await app.send_message(chat_id, text=text)
-    except Exception as e:
-        logger.debug(f"send_message fallback failed: {e}")
+    for m in candidates:
+        if not m:
+            continue
+        if m.photo:
+            return m.photo.file_id
+        if m.animation:
+            return m.animation.file_id
+        if m.video:
+            return m.video.file_id
+        if m.sticker:
+            converted = await _sticker_to_jpeg(client, m.sticker)
+            if converted:
+                return converted
     return None
 
 
-async def _send_afk_back(
-    chat_id: int,
-    name: str,
-    reason: str,
-    gone_for: str,
-    stored_photo_id: str | None,
-    is_global: bool = False,
-) -> None:
-    label = " [ɢʟᴏʙᴀʟ ᴀꜰᴋ]" if is_global else ""
-    text = (
-        f"❖ <b>{name}</b> ɪs ʙᴀᴄᴋ ᴏɴʟɪɴᴇ{label}\n"
-        f"ᴀɴᴅ ᴡᴀs ᴀᴡᴀʏ ꜰᴏʀ {gone_for}\n\n"
-        f"• ʀᴇᴀꜱᴏɴ ➜ {reason}"
-    )
-    if stored_photo_id:
-        try:
-            await app.send_photo(chat_id, photo=stored_photo_id, caption=text)
-            return
-        except Exception as e:
-            logger.debug(f"BACK send_photo failed: {e}")
-    try:
-        await app.send_message(chat_id, text=text)
-    except Exception as e:
-        logger.debug(f"BACK send_message failed: {e}")
+# ---------------------------------------------------------------------------
+# Atomic claim helpers (prevent duplicate notifications)
+# ---------------------------------------------------------------------------
 
-
-async def _send_afk_mention(m: Message, mid: int, afk_data: dict,
-                             is_global: bool = False):
-    gone_for = _format_duration(time.time() - afk_data["since"])
-    since_at = _format_since_time(afk_data["since"])
-    reason = afk_data.get("reason", "No reason given")
-    label = " [ɢʟᴏʙᴀʟ]" if is_global else ""
-    try:
-        user = await app.get_users(mid)
-        name = user.first_name or "User"
-    except Exception:
-        name = f"User {mid}"
-
-    text = (
-        f"❖ <b>{name}</b> ɪs ᴀꜰᴋ{label} since {since_at} ({gone_for})\n\n"
-        f"• ʀᴇᴀꜱᴏɴ ➜ {reason}"
-    )
-    photo_id = afk_data.get("media_file_id")
-
-    if photo_id:
-        try:
-            await m.reply_photo(photo=photo_id, caption=text)
-            return
-        except Exception as e:
-            logger.debug(f"AFK mention photo failed: {e}")
-
-    try:
-        await m.reply_text(text)
-    except Exception as e:
-        logger.debug(f"AFK mention notify failed: {e}")
-
-
-# ──────────────────────────────────────────────
-#  Shared AFK-set logic (used by both handlers)
-# ──────────────────────────────────────────────
-
-
-async def _process_afk_set(m: Message, source_msg: Message | None,
-                             reason: str, is_global: bool = False):
-    if not m.from_user:
-        return
-
-    user_id = m.from_user.id
-    chat_id = m.chat.id
-    name = m.from_user.first_name or "User"
-    reason = reason[:200]
-
-    # Guard: already AFK
-    if not is_global:
-        if await db.get_afk(chat_id, user_id):
-            return
-        if await db.get_gafk(user_id):
-            return
-    else:
-        if await db.get_gafk(user_id):
-            return
-
-    # Atomic claim — only ONE handler proceeds
-    if not await _claim_afk_notification(chat_id, user_id):
-        return
-
-    try:
-        await m.delete()
-    except Exception:
-        pass
-
-    # Register in DB
-    if not is_global:
-        await db.set_afk(chat_id, user_id, reason)
-        label = "ɴᴏᴡ ᴀꜰᴋ"
-    else:
-        await db.set_gafk(user_id, reason)
-        label = "ɴᴏᴡ ɢʟᴏʙᴀʟ ᴀꜰᴋ"
-
-    afk_text = (
-        f"❖ <b>{name}</b> ɪs {label} !\n\n"
-        f"• ʀᴇᴀꜱᴏɴ ➜ {reason}"
-    )
-
-    stored_photo_id = await _send_afk_notification(chat_id, afk_text, source_msg)
-
-    if stored_photo_id:
-        if not is_global:
-            await db.set_afk(chat_id, user_id, reason, media_file_id=stored_photo_id)
-        else:
-            await db.set_gafk(user_id, reason, media_file_id=stored_photo_id)
-
-
-# ──────────────────────────────────────────────
-#  /afk — text command handler
-# ──────────────────────────────────────────────
-
-
-@app.on_message(
-    filters.command("afk") & filters.group & ~app.bl_users,
-    group=9
-)
-async def afk_set(_, m: Message):
-    cmd, reason = _get_trigger(m)
-    if cmd != "afk":
-        return
-
-    source_msg = m.reply_to_message if m.reply_to_message else None
-    await _process_afk_set(m, source_msg, reason, is_global=False)
-    raise pyrogram.StopPropagation
-
-
-# ──────────────────────────────────────────────
-#  /afk via photo/sticker caption
-# ──────────────────────────────────────────────
-
-
-@app.on_message(
-    (filters.photo | filters.sticker | filters.animation | filters.video) &
-    filters.caption & filters.group & ~app.bl_users,
-    group=9
-)
-async def afk_set_caption(_, m: Message):
-    cmd, reason = _parse_command_and_reason(m.caption or "")
-    if cmd != "afk":
-        return
-
-    await _process_afk_set(m, m, reason, is_global=False)
-    raise pyrogram.StopPropagation
-
-
-# ──────────────────────────────────────────────
-#  /gafk command — Global AFK
-# ──────────────────────────────────────────────
-
-
-@app.on_message(
-    filters.command("gafk") & filters.group & ~app.bl_users,
-    group=9
-)
-async def gafk_set(_, m: Message):
-    cmd, reason = _get_trigger(m)
-    if cmd != "gafk":
-        return
-
-    source_msg = m.reply_to_message if (m.text and m.reply_to_message) else None
-    await _process_afk_set(m, source_msg, reason, is_global=True)
-    raise pyrogram.StopPropagation
-
-
-# ──────────────────────────────────────────────
-#  /unafk
-# ──────────────────────────────────────────────
-
-
-@app.on_message(
-    filters.command("unafk") & filters.group & ~app.bl_users,
-    group=9
-)
-async def afk_unset(_, m: Message):
-    if not m.from_user:
-        return
-
-    user_id = m.from_user.id
-    chat_id = m.chat.id
-    afk_data = await db.get_afk(chat_id, user_id)
-
-    if not afk_data:
-        try:
-            await m.reply_text("ℹ️ You are not AFK in this group.")
-        except Exception:
-            pass
-        return
-
-    gone_for = _format_duration(time.time() - afk_data["since"])
-    reason = afk_data.get("reason", "No reason given")
-    photo_id = afk_data.get("media_file_id")
-    await db.remove_afk(chat_id, user_id)
-
-    try:
-        await m.delete()
-    except Exception:
-        pass
-
-    await _send_afk_back(chat_id, m.from_user.first_name or "User",
-                          reason, gone_for, photo_id)
-    raise pyrogram.StopPropagation
-
-
-
-@app.on_message(
-    filters.command("ungafk") & filters.group & ~app.bl_users,
-    group=9
-)
-async def gafk_unset(_, m: Message):
-    if not m.from_user:
-        return
-
-    user_id = m.from_user.id
-    chat_id = m.chat.id
-    gafk_data = await db.get_gafk(user_id)
-
-    if not gafk_data:
-        try:
-            await m.reply_text("ℹ️ You don't have global AFK set.")
-        except Exception:
-            pass
-        return
-
-    gone_for = _format_duration(time.time() - gafk_data["since"])
-    reason = gafk_data.get("reason", "No reason given")
-    photo_id = gafk_data.get("media_file_id")
-    await db.remove_gafk(user_id)
-
-    try:
-        await m.delete()
-    except Exception:
-        pass
-
-    await _send_afk_back(chat_id, m.from_user.first_name or "User",
-                          reason, gone_for, photo_id, is_global=True)
-    raise pyrogram.StopPropagation
-
-
-@app.on_message(
-    filters.command("afklist") & filters.group & ~app.bl_users,
-    group=9
-)
-async def afk_list(_, m: Message):
-    chat_id = m.chat.id
-    afk_users = await db.get_all_afk(chat_id)
-
-    if not afk_users:
-        return await m.reply_text("ℹ️ No users are currently AFK in this group.")
-
+async def _claim_afk_notification(chat_id: int, user_id: int, ttl: int = 5) -> bool:
+    """Atomic set-once claim for AFK mention notifications."""
+    key = f"_afk_notif_{chat_id}_{user_id}"
     now = time.time()
-    lines = ["<b>💤 AFK Users:</b>\n"]
-    for entry in afk_users:
-        uid = entry["user_id"]
-        reason = entry.get("reason", "—")
-        since = entry.get("since", now)
-        duration = _format_duration(now - since)
+    try:
+        res = await db.cache.find_one_and_update(
+            {"_id": key, "$or": [{"exp": {"$lte": now}}, {"exp": {"$exists": False}}]},
+            {"$set": {"_id": key, "exp": now + ttl}},
+            upsert=True,
+            return_document=False,
+        )
+        # If nothing matched (exp still in future), the upsert would raise a
+        # duplicate key handled by Motor; treat "no prior doc" as claim success.
+        return res is None or res.get("exp", 0) <= now
+    except Exception:
+        # Duplicate key = someone already holds the claim
+        return False
+
+
+async def _claim_welcome_back(chat_id: int, user_id: int, ttl: int = 5) -> bool:
+    """Atomic set-once claim for Welcome Back messages."""
+    key = f"_wb_notif_{chat_id}_{user_id}"
+    now = time.time()
+    try:
+        res = await db.cache.find_one_and_update(
+            {"_id": key, "$or": [{"exp": {"$lte": now}}, {"exp": {"$exists": False}}]},
+            {"$set": {"_id": key, "exp": now + ttl}},
+            upsert=True,
+            return_document=False,
+        )
+        return res is None or res.get("exp", 0) <= now
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# UI Cards
+# ---------------------------------------------------------------------------
+
+def _afk_card(name_html: str, duration: str, since: str, reason: str, is_global: bool) -> str:
+    label = " [ɢʟᴏʙᴀʟ]" if is_global else ""
+    reason = reason.strip() or "None"
+    return (
+        f"{DIVIDER}\n"
+        f"<b>💤 AFK MODE{label}</b>\n\n"
+        f"<b>👤 User:</b>\n{name_html}\n\n"
+        f"<b>⏱ Away:</b>\n{duration}\n\n"
+        f"<b>📅 Since:</b>\n{since}\n\n"
+        f"<b>📝 Reason:</b>\n{reason}\n"
+        f"{DIVIDER}"
+    )
+
+
+def _welcome_back_card(name_html: str, duration: str, reason: str) -> str:
+    reason = reason.strip() or "None"
+    return (
+        f"{DIVIDER}\n"
+        f"<b>✨ Welcome Back</b>\n\n"
+        f"<b>👤</b> {name_html}\n\n"
+        f"<b>⏱ AFK Time</b>\n{duration}\n\n"
+        f"<b>📝 Reason</b>\n{reason}\n"
+        f"{DIVIDER}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Send helpers
+# ---------------------------------------------------------------------------
+
+async def _send_afk_reply(message: Message, text: str, media_file_id: Optional[str]):
+    try:
+        if media_file_id:
+            try:
+                return await message.reply_photo(
+                    photo=media_file_id,
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                    quote=True,
+                )
+            except Exception:
+                pass
+        return await message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            quote=True,
+        )
+    except Exception:
+        return None
+
+
+async def _send_welcome_back(client, chat_id: int, reply_to: Optional[int],
+                             text: str, media_file_id: Optional[str]):
+    try:
+        if media_file_id:
+            try:
+                return await client.send_photo(
+                    chat_id=chat_id,
+                    photo=media_file_id,
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_to_message_id=reply_to,
+                )
+            except Exception:
+                pass
+        return await client.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+            reply_to_message_id=reply_to,
+        )
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Fetch AFK record (local + global merged view)
+# ---------------------------------------------------------------------------
+
+async def _fetch_afk(chat_id: int, user_id: int):
+    """Return (record, is_global_only). Local takes precedence for display."""
+    local = await db.get_afk(chat_id, user_id)
+    if local:
+        return local, False
+    g = await db.get_gafk(user_id)
+    if g:
+        return g, True
+    return None, False
+
+
+# ---------------------------------------------------------------------------
+# Welcome-back flow (used by watcher + /unafk + /ungafk)
+# ---------------------------------------------------------------------------
+
+async def _run_welcome_back(client, message: Message, user, *, force_local=False,
+                            force_global=False):
+    """
+    Removes AFK entries (based on force flags OR any that exist), then sends
+    a single Welcome Back message using stored media.
+    """
+    chat_id = message.chat.id
+    user_id = user.id
+
+    local = await db.get_afk(chat_id, user_id)
+    g = await db.get_gafk(user_id)
+
+    remove_local = bool(local) and (force_local or not force_global or True)
+    remove_global = bool(g) and (force_global or not force_local or True)
+
+    # When explicit force flag is set, honor it strictly:
+    if force_local and not force_global:
+        remove_global = False
+    if force_global and not force_local:
+        remove_local = False
+
+    picked = local or g
+    if not picked:
+        return False
+
+    if not await _claim_welcome_back(chat_id, user_id, ttl=5):
+        # Still remove records silently to avoid stale state
+        if remove_local and local:
+            try:
+                await db.remove_afk(chat_id, user_id)
+            except Exception:
+                pass
+        if remove_global and g:
+            try:
+                await db.remove_gafk(user_id)
+            except Exception:
+                pass
+        return False
+
+    started = float(picked.get("time") or picked.get("since") or time.time())
+    reason = picked.get("reason") or ""
+    media_file_id = picked.get("media_file_id")
+
+    duration = _format_duration(time.time() - started)
+
+    if remove_local and local:
+        try:
+            await db.remove_afk(chat_id, user_id)
+        except Exception:
+            pass
+    if remove_global and g:
+        try:
+            await db.remove_gafk(user_id)
+        except Exception:
+            pass
+
+    text = _welcome_back_card(_mention(user), duration, reason)
+    await _send_welcome_back(
+        client,
+        chat_id=chat_id,
+        reply_to=message.id,
+        text=text,
+        media_file_id=media_file_id,
+    )
+    return True
+
+
+# ---------------------------------------------------------------------------
+# /afk  and  /gafk
+# ---------------------------------------------------------------------------
+
+@app.on_message(
+    filters.command(["afk", "gafk"], prefixes=["/", "!", "."])
+    & filters.group
+    & ~app.bl_users,
+    group=9,
+)
+async def set_afk_handler(client, message: Message):
+    user = message.from_user
+    if not user:
+        return
+
+    cmd, reason = _parse_command_and_reason(message)
+    is_global = (cmd == "gafk")
+
+    media_file_id = await _extract_afk_media(client, message)
+
+    payload = {
+        "reason": reason,
+        "time": time.time(),
+        "media_file_id": media_file_id,
+    }
+
+    try:
+        if is_global:
+            await db.set_gafk(user.id, payload)
+        else:
+            await db.set_afk(message.chat.id, user.id, payload)
+    except Exception:
+        return
+
+    # Claim so the very next mention (if any) doesn't fire redundantly right after set
+    await _claim_afk_notification(message.chat.id, user.id, ttl=2)
+
+    duration = _format_duration(0)
+    since = _format_since_time(payload["time"])
+    text = _afk_card(_mention(user), duration, since, reason, is_global)
+
+    await _send_afk_reply(message, text, media_file_id)
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# /unafk  and  /ungafk
+# ---------------------------------------------------------------------------
+
+@app.on_message(
+    filters.command(["unafk", "ungafk"], prefixes=["/", "!", "."])
+    & filters.group
+    & ~app.bl_users,
+    group=9,
+)
+async def unafk_handler(client, message: Message):
+    user = message.from_user
+    if not user:
+        return
+    cmd = _get_trigger(message)
+    if cmd == "ungafk":
+        await _run_welcome_back(client, message, user, force_global=True)
+    else:
+        await _run_welcome_back(client, message, user, force_local=True)
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# /afklist
+# ---------------------------------------------------------------------------
+
+@app.on_message(
+    filters.command("afklist", prefixes=["/", "!", "."])
+    & filters.group
+    & ~app.bl_users,
+    group=9,
+)
+async def afk_list(client, message: Message):
+    chat_id = message.chat.id
+    try:
+        rows = await db.get_all_afk(chat_id)
+    except Exception:
+        rows = []
+
+    if not rows:
+        try:
+            await message.reply_text(
+                f"{DIVIDER}\n<b>💤 AFK LIST</b>\n\nNo one is AFK here.\n{DIVIDER}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        return
+
+    lines = [f"{DIVIDER}", "<b>💤 AFK LIST</b>", ""]
+    for row in rows:
+        uid = row.get("user_id") or row.get("_id")
+        if not uid:
+            continue
         try:
             user = await app.get_users(uid)
-            mention = _mention(user)
         except Exception:
-            mention = f"User {uid}"
-        lines.append(f"❖ {mention}\n   ⏱ {duration} ago  •  ʀᴇᴀꜱᴏɴ ➜ {reason}")
-
-    await m.reply_text("\n\n".join(lines))
-
-
-# Auto-watcher — every group message
-_SKIP_CMDS = {"/afk", "/unafk", "/afklist", "/gafk", "/ungafk"}
-
-
-@app.on_message(
-    filters.group & ~app.bl_users,
-    group=10
-)
-async def afk_watcher(_, m: Message):
-    if not m.from_user or m.from_user.is_bot:
-        return
-
-    user_id = m.from_user.id
-    chat_id = m.chat.id
-    name = m.from_user.first_name or "User"
-
-    raw = (m.text or m.caption or "").strip().lower()
-    first_word = raw.split()[0].split("@")[0] if raw else ""
-    if first_word in _SKIP_CMDS:
-        return
-
-    cmd, _ = _get_trigger(m)
-    if cmd in ("afk", "gafk"):
-        return
-
-    # 1. Sender came back from LOCAL AFK
-    local_afk = await db.get_afk(chat_id, user_id)
-    if local_afk:
-        gone_for = _format_duration(time.time() - local_afk["since"])
-        reason = local_afk.get("reason", "No reason given")
-        photo_id = local_afk.get("media_file_id")
-        await db.remove_afk(chat_id, user_id)
-        await _send_afk_back(chat_id, name, reason, gone_for, photo_id)
-
-    # 2. Sender came back from GLOBAL AFK
-    global_afk = await db.get_gafk(user_id)
-    if global_afk:
-        gone_for = _format_duration(time.time() - global_afk["since"])
-        reason = global_afk.get("reason", "No reason given")
-        photo_id = global_afk.get("media_file_id")
-        await db.remove_gafk(user_id)
-        await _send_afk_back(chat_id, name, reason, gone_for, photo_id, is_global=True)
-
-    # 3. Mentioned/replied-to user is AFK
-    mentioned_ids: list[int] = []
-    for entity_list in (m.entities or [], m.caption_entities or []):
-        for entity in entity_list:
-            if entity.type == MessageEntityType.TEXT_MENTION and entity.user:
-                mentioned_ids.append(entity.user.id)
-            elif entity.type == MessageEntityType.MENTION:
-                text = m.text or m.caption or ""
-                username = text[entity.offset:entity.offset + entity.length]
-                if username:
-                    try:
-                        user = await app.get_users(username)
-                        if user:
-                            mentioned_ids.append(user.id)
-                    except Exception:
-                        pass
-    if m.reply_to_message and m.reply_to_message.from_user:
-        mentioned_ids.append(m.reply_to_message.from_user.id)
-
-    for mid in set(mentioned_ids):
-        if mid == user_id:
             continue
-        mid_local = await db.get_afk(chat_id, mid)
-        if mid_local:
-            await _send_afk_mention(m, mid, mid_local, is_global=False)
+        started = float(row.get("time") or row.get("since") or time.time())
+        duration = _format_duration(time.time() - started)
+        reason = (row.get("reason") or "None").strip() or "None"
+        lines.append(f"• {_mention(user)} — <i>{duration}</i> — {reason}")
+    lines.append(DIVIDER)
+
+    try:
+        await message.reply_text(
+            "\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Mention target extraction
+# ---------------------------------------------------------------------------
+
+async def _collect_mention_targets(client, message: Message) -> list:
+    """Return a deduplicated list of target user objects mentioned in this
+    message (reply target + entities in text and caption). Skips the sender."""
+    seen_ids: set = set()
+    targets = []
+
+    sender_id = message.from_user.id if message.from_user else 0
+
+    def _add(u):
+        if not u:
+            return
+        if u.id == sender_id:
+            return
+        if getattr(u, "is_bot", False):
+            return
+        if u.id in seen_ids:
+            return
+        seen_ids.add(u.id)
+        targets.append(u)
+
+    # 1) Reply target
+    if message.reply_to_message and message.reply_to_message.from_user:
+        _add(message.reply_to_message.from_user)
+
+    # 2) Entities in text/caption
+    text = message.text or message.caption or ""
+    entities = list(message.entities or []) + list(message.caption_entities or [])
+    for ent in entities:
+        try:
+            if ent.type == MessageEntityType.TEXT_MENTION and ent.user:
+                _add(ent.user)
+            elif ent.type == MessageEntityType.MENTION:
+                username = text[ent.offset: ent.offset + ent.length].lstrip("@").strip()
+                if not username:
+                    continue
+                try:
+                    u = await app.get_users(username)
+                    _add(u)
+                except Exception:
+                    continue
+        except Exception:
             continue
-        mid_global = await db.get_gafk(mid)
-        if mid_global:
-            await _send_afk_mention(m, mid, mid_global, is_global=True)
+
+    return targets
+
+
+# ---------------------------------------------------------------------------
+# AFK watcher (group=10)
+# ---------------------------------------------------------------------------
+
+_AFK_CMD_RE = re.compile(r"^[!./](afk|gafk|unafk|ungafk|afklist)(@\w+)?(\s|$)", re.IGNORECASE)
+
+
+def _is_afk_command(message: Message) -> bool:
+    text = (message.text or message.caption or "").strip()
+    if not text:
+        return False
+    return bool(_AFK_CMD_RE.match(text))
+
+
+@app.on_message(filters.group & ~app.bl_users, group=10)
+async def afk_watcher(client, message: Message):
+    # Ignore service / non-user messages
+    if not message.from_user:
+        return
+
+    sender = message.from_user
+
+    # 1) If the SENDER is AFK and this is a normal (non-AFK-command) message,
+    #    trigger Welcome Back and stop.
+    if not _is_afk_command(message):
+        local = await db.get_afk(message.chat.id, sender.id)
+        g = await db.get_gafk(sender.id)
+        if local or g:
+            await _run_welcome_back(client, message, sender)
+            return
+
+    # 2) Otherwise, look for AFK targets referenced in this message.
+    if _is_afk_command(message):
+        # Setting/removing AFK — do not fire mention notifications
+        return
+
+    try:
+        targets = await _collect_mention_targets(client, message)
+    except Exception:
+        targets = []
+
+    if not targets:
+        return
+
+    # Per-message dedup so reply+mention of same user doesn't double-fire
+    notified: set = set()
+
+    for target in targets:
+        if target.id in notified:
+            continue
+
+        record, is_global = await _fetch_afk(message.chat.id, target.id)
+        if not record:
+            continue
+
+        # Atomic claim per (chat, user) with short TTL — prevents dupes across
+        # local + global simultaneous entries.
+        if not await _claim_afk_notification(message.chat.id, target.id, ttl=5):
+            notified.add(target.id)
+            continue
+
+        started = float(record.get("time") or record.get("since") or time.time())
+        reason = record.get("reason") or ""
+        media_file_id = record.get("media_file_id")
+
+        duration = _format_duration(time.time() - started)
+        since = _format_since_time(started)
+
+        text = _afk_card(_mention(target), duration, since, reason, is_global)
+        await _send_afk_reply(message, text, media_file_id)
+
+        notified.add(target.id)
