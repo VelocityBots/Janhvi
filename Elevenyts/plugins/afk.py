@@ -271,7 +271,7 @@ async def _safe_send(send_func, *args: Any, **kwargs: Any) -> Optional[Message]:
             return None
 
 
-async def _send_text_message(chat_id: int, text: str, reply_to: int, parse_mode: str = "html") -> Optional[Message]:
+async def _send_text_message(chat_id: int, text: str, reply_to: int, parse_mode: ParseMode = ParseMode.HTML) -> Optional[Message]:
     return await _safe_send(
         app.send_message,
         chat_id=chat_id,
@@ -306,17 +306,17 @@ async def _send_afk_media(chat_id: int, reply_to: int, media_payload: Dict[str, 
     caption = caption_override if caption_override is not None else media_payload.get("caption", "")
 
     if media_type == "photo":
-        return await _safe_send(app.send_photo, chat_id=chat_id, photo=media_file_id, caption=caption, reply_to_message_id=reply_to)
+        return await _safe_send(app.send_photo, chat_id=chat_id, photo=media_file_id, caption=caption, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to)
     if media_type == "video":
-        return await _safe_send(app.send_video, chat_id=chat_id, video=media_file_id, caption=caption, reply_to_message_id=reply_to)
+        return await _safe_send(app.send_video, chat_id=chat_id, video=media_file_id, caption=caption, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to)
     if media_type == "animation":
-        return await _safe_send(app.send_animation, chat_id=chat_id, animation=media_file_id, caption=caption, reply_to_message_id=reply_to)
+        return await _safe_send(app.send_animation, chat_id=chat_id, animation=media_file_id, caption=caption, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to)
     if media_type == "audio":
-        return await _safe_send(app.send_audio, chat_id=chat_id, audio=media_file_id, caption=caption, reply_to_message_id=reply_to)
+        return await _safe_send(app.send_audio, chat_id=chat_id, audio=media_file_id, caption=caption, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to)
     if media_type == "voice":
-        return await _safe_send(app.send_voice, chat_id=chat_id, voice=media_file_id, caption=caption, reply_to_message_id=reply_to)
+        return await _safe_send(app.send_voice, chat_id=chat_id, voice=media_file_id, caption=caption, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to)
     if media_type == "document":
-        return await _safe_send(app.send_document, chat_id=chat_id, document=media_file_id, caption=caption, reply_to_message_id=reply_to)
+        return await _safe_send(app.send_document, chat_id=chat_id, document=media_file_id, caption=caption, parse_mode=ParseMode.HTML, reply_to_message_id=reply_to)
     return await _send_text_message(chat_id, caption or "", reply_to)
 
 
