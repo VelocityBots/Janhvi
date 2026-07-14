@@ -396,7 +396,7 @@ async def _send_afk_notification(
         await app.send_message(chat_id, text=text)
     except Exception:
         pass
-    return None
+    return None, None
 
 
 async def _send_afk_back(
