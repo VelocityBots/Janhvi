@@ -242,8 +242,10 @@ def _format_media_caption(media_type: str, caption: str) -> str:
         "document": "document",
     }
     label = label_map.get(media_type, media_type)
-    safe_caption = (caption or "").strip() or "None"
-    return f"\n[{label}] caption: {safe_caption}\n"
+    safe_caption = (caption or "").strip()
+    if safe_caption:
+        return f"\n[{label}] caption: {safe_caption}\n"
+    return f"\n[{label}] caption:\n"
 
 
 def _afk_card(name_html: str, duration: str, since: str, reason: str, is_global: bool, media_type: Optional[str] = None, media_caption: Optional[str] = None) -> str:
